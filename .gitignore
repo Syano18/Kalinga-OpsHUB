@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller Artifacts
+build/
+dist/
+*.spec
+
+# Secrets & Configuration
+credentials.json
+firebase_admin_key.json
+
+# Local Session & Data
+session.txt
+user_session.txt
+*.csv
+
+firebase_credentials.json
