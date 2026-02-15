@@ -1,0 +1,5 @@
+cd C:\Users\admin\Desktop\Kalinga-OpsHUB
+git add .
+git commit -m "Caption"
+git push origin main
+

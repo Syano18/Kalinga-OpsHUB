@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from PIL import Image, ImageTk  # Handle Logo Images
+from PIL import Image, ImageTk
 import gspread
 from datetime import datetime
 import threading
@@ -13,16 +13,22 @@ import os
 import re
 import socket
 import sys
-import webbrowser
 import subprocess
 import tempfile
 import csv
+import json
+import hashlib
+import time
 
-# ==========================================
-#         CONFIGURATION & THEME
-# ==========================================
+try:
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    GOOGLE_LOGIN_AVAILABLE = True
+except ImportError:
+    GOOGLE_LOGIN_AVAILABLE = False
+
 SHEET_NAME = "Logbook_db"
-# GitHub Update Configuration
 GITHUB_OWNER = "Syano18" # REPLACE WITH YOUR GITHUB USERNAME
 GITHUB_REPO = "Kalinga-OpsHUB"  # REPLACE WITH YOUR REPO NAME
 
@@ -37,10 +43,12 @@ def resource_path(relative_path):
 
 GOOGLE_CREDENTIALS_FILE = resource_path("credentials.json")
 FIREBASE_ADMIN_KEY = resource_path("firebase_admin_key.json")
-FIREBASE_WEB_API_KEY = "AIzaSyCMoofIzlep61HniypQb3x1Hd1a2adwNhg" 
-CURRENT_VERSION = "1.4"
+FIREBASE_WEB_API_KEY = "AIzaSyAVTSOd5gN4QhFWjXBiQvpTIXLMzT_HSMU" 
+CLIENT_SECRETS_FILE = resource_path("client_secret.json")
+SCOPES = ['https://www.googleapis.com/auth/userinfo.email', 'openid']
+CURRENT_VERSION = "1.5"
 
-# Save session in ProgramData to ensure write access
+# Save session and cache in a user-writable directory
 try:
     # Typically C:\Users\USER\AppData\Local\KalingaOpsHub
     base_dir = os.getenv("LOCALAPPDATA", os.path.expanduser("~"))
@@ -48,18 +56,47 @@ try:
     if not os.path.exists(session_dir):
         os.makedirs(session_dir)
     SESSION_FILE = os.path.join(session_dir, "session.txt")
+    CACHE_FILE = os.path.join(session_dir, "user_cache.json")
+    GOOGLE_TOKEN_FILE = os.path.join(session_dir, "token.json")
+    LOGS_CACHE_FILE = os.path.join(session_dir, "logs_cache.json")
 except Exception:
     SESSION_FILE = "user_session.txt"
+    CACHE_FILE = "user_cache.json"
+    GOOGLE_TOKEN_FILE = "token.json"
+    LOGS_CACHE_FILE = "logs_cache.json"
 
-# Change this to your actual logo filename (PNG recommended)
+def get_cache_data(email):
+    """Retrieves cached user data if valid (less than 10 days old)."""
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r") as f:
+                data = json.load(f)
+                if data.get("email") == email:
+                    # Check 10 days expiration (864000 seconds)
+                    if time.time() - data.get("timestamp", 0) < 864000:
+                        return data
+    except: pass
+    return None
+
+def save_cache_data(email, password, user_data):
+    """Saves user data and password hash to local cache."""
+    try:
+        data = {
+            "email": email,
+            "password_hash": hashlib.sha256(password.encode()).hexdigest(),
+            "user_data": user_data,
+            "timestamp": time.time()
+        }
+        with open(CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except: pass
+
 LOGO_PATH = resource_path("assets/Logo.png")
 Agency_Logo = resource_path("assets/PSA.png")
 
-# Optional defaults for login (leave empty for none)
 DEFAULT_EMAIL = ""
 DEFAULT_PASSWORD = ""
 
-# Modern Color Palette
 CLR_PRIMARY = "#0066cc"      
 CLR_PRIMARY_HOVER = "#0052a3"
 CLR_BG = "#f8f9fa"           
@@ -68,7 +105,6 @@ CLR_CARD = "#ffffff"
 CLR_TEXT = "#3c4043"         
 CLR_SUCCESS = "#28a745"
 
-# --- FIREBASE INIT ---
 if not firebase_admin._apps:
     try:
         cred = credentials.Certificate(FIREBASE_ADMIN_KEY)
@@ -76,9 +112,6 @@ if not firebase_admin._apps:
     except Exception as e:
         print(f"Firebase Admin Error: {e}")
 
-# ==========================================
-#         MODERN UI COMPONENT HELPERS
-# ==========================================
 def load_logo(path, size=(100, 100)):
     """Safely loads and resizes an image."""
     try:
@@ -104,7 +137,6 @@ def create_labeled_entry(parent, label_text, var=None, show=None):
     container.pack(fill="x", pady=8)
     tk.Label(container, text=label_text, font=("Segoe UI", 9, "bold"), 
              bg=CLR_CARD, fg=CLR_TEXT).pack(anchor="w")
-    # Border frame with thin borders on all sides
     border = tk.Frame(container, bg="#dadce0", padx=1, pady=1)
     border.pack(fill="x", pady=(4, 0))
     entry = tk.Entry(border, textvariable=var, show=show, font=("Segoe UI", 11), 
@@ -165,9 +197,6 @@ def check_internet():
     except OSError:
         return False
 
-# ==========================================
-#         USER MANAGEMENT MODULE
-# ==========================================
 class ManageUsersView:
     def __init__(self, parent_frame, google_sheet_connection, web_api_key):
         self.frame = parent_frame
@@ -269,7 +298,7 @@ class ManageUsersView:
     def open_invite_window(self):
         win = tk.Toplevel(self.frame.winfo_toplevel())
         win.title("Enrol New Staff")
-        win.geometry("450x750")
+        win.geometry("450x500")
         win.configure(bg=CLR_CARD, padx=30, pady=20)
 
         # center on parent
@@ -277,37 +306,88 @@ class ManageUsersView:
         root = self.frame.winfo_toplevel()
         rx = root.winfo_x(); ry = root.winfo_y()
         rw = root.winfo_width(); rh = root.winfo_height()
-        ww = 450; wh = 750
+        ww = 450; wh = 500
         win.geometry(f"{ww}x{wh}+{rx + (rw-ww)//2}+{ry + (rh-wh)//2}")
 
         # Make modal
         win.transient(root)
         win.grab_set()
 
+        # --- Field Variables ---
         email_var = tk.StringVar()
+        fname_var = tk.StringVar()
+        mi_var = tk.StringVar()
+        lname_var = tk.StringVar()
+        pos_var = tk.StringVar()
+        sal_var = tk.StringVar()
+        sg_var = tk.StringVar()
+        role_var = tk.StringVar(value="Staff")
+        ht_role_var = tk.StringVar(value="User")
+
+        # --- Layout ---
+
+        # Email (Full width)
         create_labeled_entry(win, "Email Address", email_var)
 
-        fname_var = tk.StringVar()
-        create_labeled_entry(win, "First Name", fname_var)
+        # Name fields (First, Middle, Last)
+        name_frame = tk.Frame(win, bg=CLR_CARD)
+        name_frame.pack(fill="x", pady=8)
 
-        mi_var = tk.StringVar()
-        create_labeled_entry(win, "Middle Name", mi_var)
+        fname_container = tk.Frame(name_frame, bg=CLR_CARD)
+        fname_container.pack(side="left", expand=True, fill="x", padx=(0, 4))
+        tk.Label(fname_container, text="First Name", font=("Segoe UI", 9, "bold"), bg=CLR_CARD, fg=CLR_TEXT).pack(anchor="w")
+        fname_border = tk.Frame(fname_container, bg="#dadce0", padx=1, pady=1)
+        fname_border.pack(fill="x", pady=(4, 0))
+        tk.Entry(fname_border, textvariable=fname_var, font=("Segoe UI", 11), bg="white", relief=tk.FLAT, bd=0).pack(fill="x", ipady=8, padx=5)
+        
+        mi_container = tk.Frame(name_frame, bg=CLR_CARD)
+        mi_container.pack(side="left", fill="x", padx=4)
+        tk.Label(mi_container, text="M.I.", font=("Segoe UI", 9, "bold"), bg=CLR_CARD, fg=CLR_TEXT).pack(anchor="w")
+        mi_border = tk.Frame(mi_container, bg="#dadce0", padx=1, pady=1)
+        mi_border.pack(fill="x", pady=(4, 0))
+        tk.Entry(mi_border, textvariable=mi_var, font=("Segoe UI", 11), width=5, bg="white", relief=tk.FLAT, bd=0).pack(fill="x", ipady=8, padx=5)
 
-        lname_var = tk.StringVar()
-        create_labeled_entry(win, "Last Name", lname_var)
+        lname_container = tk.Frame(name_frame, bg=CLR_CARD)
+        lname_container.pack(side="left", expand=True, fill="x", padx=(4, 0))
+        tk.Label(lname_container, text="Last Name", font=("Segoe UI", 9, "bold"), bg=CLR_CARD, fg=CLR_TEXT).pack(anchor="w")
+        lname_border = tk.Frame(lname_container, bg="#dadce0", padx=1, pady=1)
+        lname_border.pack(fill="x", pady=(4, 0))
+        tk.Entry(lname_border, textvariable=lname_var, font=("Segoe UI", 11), bg="white", relief=tk.FLAT, bd=0).pack(fill="x", ipady=8, padx=5)
 
-        pos_var = tk.StringVar()
+        # Position (Full width)
         create_labeled_entry(win, "Position", pos_var)
 
-        sal_var = tk.StringVar()
-        create_labeled_entry(win, "Salary", sal_var)
+        # Salary and SG
+        salary_frame = tk.Frame(win, bg=CLR_CARD)
+        salary_frame.pack(fill="x", pady=8)
 
-        sg_var = tk.StringVar()
-        create_labeled_entry(win, "Salary Grade", sg_var)
-        
-        tk.Label(win, text="Role", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(10,0))
-        role_var = tk.StringVar(value="Staff")
-        ttk.Combobox(win, textvariable=role_var, values=["Staff", "Admin"], state="readonly", font=("Segoe UI", 11)).pack(fill="x", pady=5)
+        sal_container = tk.Frame(salary_frame, bg=CLR_CARD)
+        sal_container.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        tk.Label(sal_container, text="Salary", font=("Segoe UI", 9, "bold"), bg=CLR_CARD, fg=CLR_TEXT).pack(anchor="w")
+        sal_border = tk.Frame(sal_container, bg="#dadce0", padx=1, pady=1)
+        sal_border.pack(fill="x", pady=(4, 0))
+        tk.Entry(sal_border, textvariable=sal_var, font=("Segoe UI", 11), bg="white", relief=tk.FLAT, bd=0).pack(fill="x", ipady=8, padx=5)
+
+        sg_container = tk.Frame(salary_frame, bg=CLR_CARD)
+        sg_container.pack(side="left", expand=True, fill="x", padx=(8, 0))
+        tk.Label(sg_container, text="Salary Grade", font=("Segoe UI", 9, "bold"), bg=CLR_CARD, fg=CLR_TEXT).pack(anchor="w")
+        sg_border = tk.Frame(sg_container, bg="#dadce0", padx=1, pady=1)
+        sg_border.pack(fill="x", pady=(4, 0))
+        tk.Entry(sg_border, textvariable=sg_var, font=("Segoe UI", 11), bg="white", relief=tk.FLAT, bd=0).pack(fill="x", ipady=8, padx=5)
+
+        # Roles (OpsHub Role, HireTrack Role)
+        roles_frame = tk.Frame(win, bg=CLR_CARD)
+        roles_frame.pack(fill="x", pady=8)
+
+        role_container = tk.Frame(roles_frame, bg=CLR_CARD)
+        role_container.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        tk.Label(role_container, text="Role", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w")
+        ttk.Combobox(role_container, textvariable=role_var, values=["Staff", "Admin"], state="readonly", font=("Segoe UI", 11)).pack(fill="x", pady=5)
+
+        ht_role_container = tk.Frame(roles_frame, bg=CLR_CARD)
+        ht_role_container.pack(side="left", expand=True, fill="x", padx=(8, 0))
+        tk.Label(ht_role_container, text="HireTrack Role", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w")
+        ttk.Combobox(ht_role_container, textvariable=ht_role_var, values=["Admin", "PACD", "Focal Person", "User"], state="readonly", font=("Segoe UI", 11)).pack(fill="x", pady=5)
 
         btn = create_modern_button(win, "Send Invitation", None)
         btn.pack(fill="x", pady=20)
@@ -316,6 +396,7 @@ class ManageUsersView:
             # Collect values
             email = email_var.get().strip()
             role = role_var.get()
+            ht_role = ht_role_var.get()
             fname = fname_var.get().strip()
             mi = mi_var.get().strip()
             lname = lname_var.get().strip()
@@ -332,12 +413,9 @@ class ManageUsersView:
             if not check_internet():
                 return messagebox.showerror("Network Error", "No internet connection detected.")
             
-            # Prevent closing while saving
             win.protocol("WM_DELETE_WINDOW", lambda: None)
             
-            # Collect all data
-            user_data = [email, role, fname, mi, lname, pos, sal, sg]
-            user_data = [email, role, fname, mi, lname, pos, sal, sg, "Active"]
+            user_data = [email, role, fname, mi, lname, pos, sal, sg, "Active", ht_role]
 
             btn.config(text="Sending...", state="disabled")
             threading.Thread(target=self._invite_thread, args=(user_data, win, btn)).start()
@@ -452,33 +530,48 @@ class ManageUsersView:
         if not sel: return
         val = self.tree.item(sel[0])['values']
         email = val[0]
-        current_role = val[2]
+
+        try:
+            cell = self.worksheet.find(email)
+            row_vals = self.worksheet.row_values(cell.row)
+            if len(row_vals) < 10: row_vals += [""] * (10 - len(row_vals))
+            current_role = row_vals[1]
+            current_ht_role = row_vals[9]
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load user details: {e}")
+            return
 
         win = tk.Toplevel(self.frame.winfo_toplevel())
-        win.title("Edit Role")
-        win.geometry("300x200")
+        win.title("Edit Roles")
+        win.geometry("350x320")
         win.configure(bg=CLR_CARD, padx=20, pady=20)
         
         win.update_idletasks()
         root = self.frame.winfo_toplevel()
-        x = root.winfo_x() + (root.winfo_width() - 300) // 2
-        y = root.winfo_y() + (root.winfo_height() - 200) // 2
+        x = root.winfo_x() + (root.winfo_width() - 350) // 2
+        y = root.winfo_y() + (root.winfo_height() - 320) // 2
         win.geometry(f"+{x}+{y}")
         win.transient(root); win.grab_set()
 
-        tk.Label(win, text=f"Update Role for {email}", font=("Segoe UI", 10), bg=CLR_CARD, wraplength=260).pack(pady=(0, 15))
+        tk.Label(win, text=f"Update Roles for {email}", font=("Segoe UI", 10), bg=CLR_CARD, wraplength=300).pack(pady=(0, 15))
+        
+        tk.Label(win, text="OpsHub Role", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w")
         role_var = tk.StringVar(value=current_role if current_role in ["Staff", "Admin"] else "Staff")
-        ttk.Combobox(win, textvariable=role_var, values=["Staff", "Admin"], state="readonly", font=("Segoe UI", 11)).pack(fill="x", pady=10)
+        ttk.Combobox(win, textvariable=role_var, values=["Staff", "Admin"], state="readonly", font=("Segoe UI", 11)).pack(fill="x", pady=(5, 15))
+
+        tk.Label(win, text="HireTrack Role", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w")
+        ht_role_var = tk.StringVar(value=current_ht_role if current_ht_role in ["Admin", "PACD", "Focal Person", "User"] else "User")
+        ttk.Combobox(win, textvariable=ht_role_var, values=["Admin", "PACD", "Focal Person", "User"], state="readonly", font=("Segoe UI", 11)).pack(fill="x", pady=(5, 15))
 
         def save():
             try:
-                cell = self.worksheet.find(email)
                 self.worksheet.update_cell(cell.row, 2, role_var.get())
-                messagebox.showinfo("Success", "Role updated.")
+                self.worksheet.update_cell(cell.row, 10, ht_role_var.get())
+                messagebox.showinfo("Success", "Roles updated.")
                 win.destroy()
                 self.refresh_table()
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to update role: {e}")
+                messagebox.showerror("Error", f"Failed to update roles: {e}")
 
         create_modern_button(win, "Save Changes", save).pack(fill="x", pady=10)
 
@@ -525,9 +618,6 @@ class ManageUsersView:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete user: {e}")
 
-# ==========================================
-#         LOGIN SYSTEM
-# ==========================================
 class LoginWindow:
     def __init__(self, root, on_success):
         self.root = root
@@ -537,30 +627,24 @@ class LoginWindow:
         # Ensure window is restored to normal state (not maximized)
         self.root.state('normal')
         
-        # Center window on screen
         width, height = 400, 600
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         x = (screen_width - width) // 2
         y = (screen_height - height) // 2
         self.root.geometry(f"{width}x{height}+{x}+{y}")
-        
-        # Disable resizing and maximize
         self.root.resizable(False, False)
-        
         self.root.configure(bg=CLR_CARD)
         
         container = tk.Frame(self.root, bg=CLR_CARD, padx=40)
         container.pack(expand=True, fill="both")
         
-        # Info Button
         self.info_btn = tk.Button(self.root, text="ℹ", font=("Segoe UI", 16), bg=CLR_CARD, fg=CLR_PRIMARY,
                   relief=tk.FLAT, bd=0, cursor="hand2")
         self.info_btn.place(x=350, y=10)
         self.info_btn.bind("<Enter>", self.show_about_tooltip)
         self.info_btn.bind("<Leave>", self.hide_about_tooltip)
         
-        # --- LOGO SECTION ---
         self.logo_img = load_logo(LOGO_PATH, size=(120, 120))
         if self.logo_img:
             tk.Label(container, image=self.logo_img, bg=CLR_CARD).pack(pady=(40, 5))
@@ -571,12 +655,9 @@ class LoginWindow:
         tk.Label(container, text="Kalinga Operations HUB", font=("Segoe UI", 10), 
                  bg=CLR_CARD, fg="#5f6368").pack(pady=(0, 40))
         
-        # Email field (with optional default)
         self.email_var = tk.StringVar(value=DEFAULT_EMAIL)
         self.e_mail = create_labeled_entry(container, "Email", self.email_var)
         self.e_mail.bind('<Return>', lambda e: self.attempt_login())
-        
-        # Password field with show/hide toggle (with optional default)
         self.pass_var = tk.StringVar(value=DEFAULT_PASSWORD)
         pass_container = tk.Frame(container, bg=CLR_CARD)
         pass_container.pack(fill="x", pady=8)
@@ -598,11 +679,15 @@ class LoginWindow:
                         bd=0, cursor="hand2", command=self.toggle_password)
         self.show_pass_btn.pack(side="right", padx=5)
         
-        # Login button
         self.btn = create_modern_button(container, "Login", self.attempt_login)
         self.btn.pack(fill="x", pady=20)
         
-        # Forgot password link
+        if GOOGLE_LOGIN_AVAILABLE:
+            self.google_btn = tk.Button(container, text="Sign in with Google", command=self.login_with_google,
+                                   bg="#db4437", fg="white", font=("Segoe UI", 10, "bold"), 
+                                   relief=tk.FLAT, cursor="hand2", pady=8)
+            self.google_btn.pack(fill="x", pady=(0, 20))
+        
         forgot_frame = tk.Frame(container, bg=CLR_CARD)
         forgot_frame.pack(fill="x", pady=(0, 10))
         forgot_btn = tk.Button(forgot_frame, text="Forgot Password?", bg=CLR_CARD, fg=CLR_PRIMARY, 
@@ -610,10 +695,8 @@ class LoginWindow:
                                cursor="hand2", command=self.open_forgot_password)
         forgot_btn.pack(anchor="e")
         
-        # Version Label (Right Bottom)
         tk.Label(self.root, text=f"v{CURRENT_VERSION}", font=("Segoe UI", 8), bg=CLR_CARD, fg="#9aa0a6").place(relx=0.98, rely=0.99, anchor="se")
 
-        # Update Button (Left Bottom)
         self.update_btn = tk.Button(self.root, text="Check for Updates", font=("Segoe UI", 8, "underline"), bg=CLR_CARD, fg=CLR_PRIMARY, 
                                     relief=tk.FLAT, bd=0, cursor="hand2", command=self.check_updates)
         self.update_btn.place(relx=0.02, rely=0.99, anchor="sw")
@@ -628,7 +711,6 @@ class LoginWindow:
             return
         
         try:
-            # GitHub API to get latest release
             api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
             response = requests.get(api_url, timeout=10)
             
@@ -636,8 +718,6 @@ class LoginWindow:
                 data = response.json()
                 latest_ver = data.get("tag_name", "").lstrip("v").strip() # Remove 'v' prefix if present
                 assets = data.get("assets", [])
-                
-                # Find the first asset that ends with .exe
                 dl_link = next((a.get("browser_download_url") for a in assets if a.get("name", "").endswith(".exe")), None)
                 
                 if not dl_link:
@@ -663,7 +743,6 @@ class LoginWindow:
         win.configure(bg=CLR_CARD)
         win.transient(self.root); win.grab_set()
         
-        # Center
         win.update_idletasks()
         win.geometry(f"+{self.root.winfo_x() + (self.root.winfo_width()-350)//2}+{self.root.winfo_y() + (self.root.winfo_height()-150)//2}")
         
@@ -695,7 +774,6 @@ class LoginWindow:
                 if os.path.getsize(dest) < 1024:
                     raise Exception("Download failed (file too small).")
 
-                # Use Popen without shell=True for security and reliability
                 self.root.after(0, lambda: (lbl.configure(text="Running Installer..."), subprocess.Popen([dest]), self.root.destroy(), sys.exit()))
             except Exception as e:
                 self.root.after(0, lambda: (win.destroy(), messagebox.showerror("Update Error", f"Failed: {e}")))
@@ -719,7 +797,6 @@ class LoginWindow:
         win.configure(bg=CLR_CARD)
         win.resizable(False, False)
         
-        # Center on login window
         self.root.update_idletasks()
         root_x = self.root.winfo_x()
         root_y = self.root.winfo_y()
@@ -792,36 +869,141 @@ class LoginWindow:
     def hide_about_tooltip(self, event):
         if hasattr(self, 'tw') and self.tw: self.tw.destroy(); self.tw = None
 
+    def login_with_google(self):
+        if not check_internet():
+            messagebox.showerror("Network Error", "No internet connection detected.")
+            return
+        
+        if not os.path.exists(CLIENT_SECRETS_FILE):
+            messagebox.showerror("Configuration Error", "client_secret.json not found.\nPlease add the OAuth2 client secret file.")
+            return
+
+        self.btn.config(state="disabled")
+        if hasattr(self, 'google_btn'): self.google_btn.config(state="disabled")
+        threading.Thread(target=self._google_auth_flow, daemon=True).start()
+
+    def _google_auth_flow(self):
+        creds = None
+        if os.path.exists(GOOGLE_TOKEN_FILE):
+            try: creds = Credentials.from_authorized_user_file(GOOGLE_TOKEN_FILE, SCOPES)
+            except: creds = None
+        
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try: creds.refresh(Request())
+                except: creds = None
+            
+            if not creds:
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
+                    creds = flow.run_local_server(port=0, access_type='offline', prompt='consent')
+                except Exception as e:
+                    self.root.after(0, lambda: self._reset_login_ui(f"Google Sign-In Error: {e}"))
+                    return
+            
+            try:
+                with open(GOOGLE_TOKEN_FILE, 'w') as token: token.write(creds.to_json())
+            except: pass
+
+        try:
+            session = requests.Session()
+            session.headers.update({'Authorization': f'Bearer {creds.token}'})
+            user_info = session.get('https://www.googleapis.com/oauth2/v1/userinfo').json()
+            email = user_info.get('email')
+            
+            if email:
+                self.root.after(0, lambda: self._process_google_login(email))
+            else:
+                raise Exception("Email not found in Google account info.")
+        except Exception as e:
+            self.root.after(0, lambda: self._reset_login_ui(f"Google Sign-In Error: {e}"))
+
+    def _process_google_login(self, email):
+        def check_gs():
+            try:
+                gc = gspread.service_account(filename=GOOGLE_CREDENTIALS_FILE)
+                sh = gc.open(SHEET_NAME)
+                ws = sh.worksheet("User_Permissions")
+                all_users = ws.get_all_records()
+                user_data = next((user for user in all_users if user.get('Email') and user.get('Email').lower() == email.lower()), None)
+                self.root.after(0, lambda: self._finish_google_login(email, user_data))
+            except Exception as e:
+                self.root.after(0, lambda: self._reset_login_ui(f"Database Error: {e}"))
+        threading.Thread(target=check_gs, daemon=True).start()
+
+    def _finish_google_login(self, email, user_data):
+        if not user_data:
+            self._reset_login_ui("This Google account is not registered in the system.")
+            return
+            
+        if user_data.get('Status') == "Inactive":
+            self._reset_login_ui("Account is Inactive.\nPlease contact your administrator.")
+            return
+
+        save_cache_data(email, "GOOGLE_AUTH_TOKEN", user_data)
+        try:
+            with open(SESSION_FILE, "w") as f: f.write(email)
+        except: pass
+        
+        self.on_success(email, user_data)
+
+    def _reset_login_ui(self, error_msg=None):
+        if error_msg: messagebox.showerror("Login Error", error_msg)
+        self.btn.config(state="normal")
+        if hasattr(self, 'google_btn'): self.google_btn.config(state="normal")
+
     def attempt_login(self):
         if not check_internet():
             messagebox.showerror("Network Error", "No internet connection detected.\nPlease check your connection.")
             return
 
         self.btn.config(text="Authenticating...", state="disabled")
-        em = self.email_var.get() if hasattr(self, 'email_var') else self.e_mail.get()
-        pw = self.pass_var.get() if hasattr(self, 'pass_var') else self.e_pass.get()
+        em = self.email_var.get()
+        pw = self.pass_var.get()
         threading.Thread(target=self._auth, args=(em, pw)).start()
 
     def _auth(self, em, pw):
+        # Check local cache first to speed up login
+        cached = get_cache_data(em)
+        if cached:
+            ph = hashlib.sha256(pw.encode()).hexdigest()
+            if cached.get("password_hash") == ph:
+                try:
+                    with open(SESSION_FILE, "w") as f: f.write(em)
+                except: pass
+                self.root.after(0, lambda: self.on_success(em, cached["user_data"]))
+                return
+
+        # Start Google Sheets check in parallel to speed up login
+        gs_result = {"user_data": None}
+        def check_gs_status():
+            try:
+                gc = gspread.service_account(filename=GOOGLE_CREDENTIALS_FILE)
+                sh = gc.open(SHEET_NAME)
+                ws = sh.worksheet("User_Permissions")
+                all_users = ws.get_all_records()
+                gs_result["user_data"] = next((user for user in all_users if user.get('Email') and user.get('Email').lower() == em.lower()), None)
+            except Exception as e:
+                print(f"Status check warning: {e}")
+
+        gs_thread = threading.Thread(target=check_gs_status)
+        gs_thread.start()
+
         url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_WEB_API_KEY}"
         try:
             r = requests.post(url, json={"email": em, "password": pw, "returnSecureToken": True})
-            if r.status_code == 200:
-                user_data = None
-                # Check Status in Google Sheets
-                try:
-                    gc = gspread.service_account(filename=GOOGLE_CREDENTIALS_FILE)
-                    sh = gc.open(SHEET_NAME)
-                    ws = sh.worksheet("User_Permissions")
-                    
-                    all_users = ws.get_all_records()
-                    user_data = next((user for user in all_users if user.get('Email') and user.get('Email').lower() == em.lower()), None)
+            
+            # Wait for GS thread to finish
+            gs_thread.join()
 
-                    if user_data and user_data.get('Status') == "Inactive":
-                        self.root.after(0, lambda: self._fail("Account is Inactive.\nPlease contact your administrator."))
-                        return
-                except Exception as e:
-                    print(f"Status check warning: {e}")
+            if r.status_code == 200:
+                user_data = gs_result["user_data"]
+                
+                save_cache_data(em, pw, user_data)
+
+                if user_data and user_data.get('Status') == "Inactive":
+                    self.root.after(0, lambda: self._fail("Account is Inactive.\nPlease contact your administrator."))
+                    return
 
                 try:
                     with open(SESSION_FILE, "w") as f: f.write(em)
@@ -841,21 +1023,31 @@ class LoginWindow:
         messagebox.showerror("Error", msg)
         self.btn.config(text="Login", state="normal")
 
-# ==========================================
-#         MAIN DASHBOARD
-# ==========================================
 class LogbookApp:
     def __init__(self, root, email, user_data=None, on_success_callback=None):
         self.root = root
         self.user_data = user_data
         self.email = email
         self.role = "Staff"
+        
+        if self.user_data:
+            role_val = self.user_data.get('Role')
+            self.role = str(role_val).strip() if role_val else "Staff"
+            
         self.master_logs = []
         self.headers = []
+        self.fetching_logs = False
+        self.data_loaded_from_net = False
+        self.connecting = True
         self.user_names_cache = []
         self.current_user_name = ""
         self.on_success_callback = on_success_callback
         self.root.title("Kalinga OpsHUB")
+
+        self.ws_users = None
+        self.ws_logs = None
+        self.gc = None
+        self.sh = None
 
         style = ttk.Style()
         style.theme_use("clam")
@@ -865,63 +1057,81 @@ class LogbookApp:
         style.configure("TCombobox", fieldbackground="white", background="white", font=("Segoe UI", 13))
         style.map("TCombobox", fieldbackground=[("readonly", "white")], background=[("readonly", "white")])
         
-        self.connect()
-        
-        # Center window on screen
         width, height = 1200, 800
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         x = (screen_width - width) // 2
         y = (screen_height - height) // 2
         self.root.geometry(f"{width}x{height}+{x}+{y}")
-        
-        # Enable resizing for the dashboard
         self.root.resizable(True, True)
         
         self.root.configure(bg=CLR_BG)
         self.setup_layout()
         self.show_page("logs")
         self.monitor_connection()
-        threading.Thread(target=self.fetch_user_names, daemon=True).start()
+        self.load_local_logs_cache()
+        
+        # Start connection in background to prevent startup freeze
+        threading.Thread(target=self.connect_background, daemon=True).start()
 
-    def connect(self):
-        self.ws_users = None
-        self.ws_logs = None
+    def connect_background(self):
         if not check_internet():
-            messagebox.showerror("Network Error", "No internet connection detected.\nApplication cannot connect to the database.")
+            self.connecting = False
+            self.root.after(0, self.draw_logs)
             return
 
         try:
             self.gc = gspread.service_account(filename=GOOGLE_CREDENTIALS_FILE)
             self.sh = self.gc.open(SHEET_NAME)
             self.ws_logs = self.sh.sheet1
+            
+            role_updated = False
             try:
                 self.ws_users = self.sh.worksheet("User_Permissions")
-
-                user_for_role = self.user_data
-                if not user_for_role: # If not passed from login, fetch it
+                
+                if not self.user_data:
                     all_records = self.ws_users.get_all_records()
-                    user_for_role = next((u for u in all_records if u.get('Email') and u.get('Email').lower() == self.email.lower()), None)
-
-                if user_for_role:
-                    role_val = user_for_role.get('Role')
-                    self.role = str(role_val).strip() if role_val else "Staff"
-                # If user_for_role is None, self.role remains its default "Staff" value, which is correct.
-
-            except gspread.WorksheetNotFound:
-                print("Warning: 'User_Permissions' worksheet not found.")
-            except Exception:
-                pass # User not in list or other error, default to Staff, which is the default value
+                    u = next((x for x in all_records if x.get('Email') and x.get('Email').lower() == self.email.lower()), None)
+                    if u:
+                        self.user_data = u
+                        r = str(u.get('Role')).strip()
+                        if r != self.role:
+                            self.role = r
+                            role_updated = True
+            except: pass
+            
+            self.root.after(0, lambda: self.on_connected(role_updated))
         except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect to Google Sheets:\n{e}")
+            print(f"Connection Error: {e}")
+            self.connecting = False
+            self.root.after(0, self.draw_logs)
+
+    def on_connected(self, role_updated=False):
+        self.connecting = False
+        if role_updated:
+            self.build_sidebar()
+        
+        if not self.fetching_logs and not self.data_loaded_from_net:
+            self.fetching_logs = True
+            threading.Thread(target=self._fetch_logs_thread, daemon=True).start()
+        
+        threading.Thread(target=self.fetch_user_names, daemon=True).start()
     
+    def load_local_logs_cache(self):
+        try:
+            if os.path.exists(LOGS_CACHE_FILE):
+                with open(LOGS_CACHE_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.headers = data.get("headers", [])
+                    self.master_logs = data.get("rows", [])
+        except: pass
+
     def fetch_user_names(self):
         """Fetches user names for dropdowns in background."""
         try:
             if not self.ws_users: return
             rows = self.ws_users.get_all_values()
             names = []
-            # Skip header, assume cols: Email(0), Role(1), FName(2), MI(3), LName(4)
             for r in rows[1:]:
                 if len(r) > 4:
                     fname = r[2].strip()
@@ -929,7 +1139,7 @@ class LogbookApp:
                     if mi: mi = f"{mi[0]}."
                     lname = r[4].strip()
                     full = f"{fname} {mi} {lname}".strip()
-                    full = " ".join(full.split()) # Clean extra spaces
+                    full = " ".join(full.split())
                     if full: names.append(full)
                     
                     if r[0].strip().lower() == self.email.lower():
@@ -949,27 +1159,39 @@ class LogbookApp:
 
     def monitor_connection(self):
         """Continuously checks internet connection and updates sidebar status."""
-        try:
-            if not self.status_dot.winfo_exists():
-                return
+        def check():
+            is_online = check_internet()
+            self.root.after(0, lambda: self._update_status(is_online))
+        threading.Thread(target=check, daemon=True).start()
+        self.root.after(5000, self.monitor_connection)
 
-            if check_internet():
+    def _update_status(self, is_online):
+        try:
+            if not self.status_dot.winfo_exists(): return
+            if is_online:
                 self.status_dot.config(fg=CLR_SUCCESS)
                 self.status_text.config(text="SYSTEM ONLINE", fg="#9aa0a6")
             else:
                 self.status_dot.config(fg="#d32f2f") # Red color
                 self.status_text.config(text="SYSTEM OFFLINE", fg="#d32f2f")
-            self.root.after(5000, self.monitor_connection)
-        except Exception:
-            pass
+        except: pass
 
     def setup_layout(self):
-        # Sidebar
         self.sidebar = tk.Frame(self.root, bg=CLR_SIDEBAR, width=220)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         
-        # Sidebar Logo (without text)
+        self.build_sidebar()
+
+        self.content = tk.Frame(self.root, bg=CLR_BG)
+        self.content.pack(side="right", fill="both", expand=True)
+        self.p_logs = tk.Frame(self.content, bg=CLR_BG)
+        self.p_users = tk.Frame(self.content, bg=CLR_BG)
+        self.users_view = None
+
+    def build_sidebar(self):
+        for w in self.sidebar.winfo_children(): w.destroy()
+
         self.side_logo = load_logo(LOGO_PATH, size=(100, 100))
         if self.side_logo:
             tk.Label(self.sidebar, image=self.side_logo, bg=CLR_SIDEBAR).pack(pady=(20, 30))
@@ -984,30 +1206,21 @@ class LogbookApp:
         if self.role == "Admin":
             add_nav("users", "User Management", lambda: self.show_page("users"))
 
-        # Bottom section with Status and Logout
         bottom_frame = tk.Frame(self.sidebar, bg=CLR_SIDEBAR)
         bottom_frame.pack(side="bottom", fill="x")
         
-        # Current User Display
         tk.Label(bottom_frame, text="Logged in as:", font=("Segoe UI", 8), bg=CLR_SIDEBAR, fg="#9aa0a6").pack(anchor="w", padx=20, pady=(10, 0))
         tk.Label(bottom_frame, text=self.email, font=("Segoe UI", 9, "bold"), bg=CLR_SIDEBAR, fg="white", wraplength=180, justify="left").pack(anchor="w", padx=20, pady=(0, 10))
         
-        # Logout Button
         logout_btn = create_modern_button(bottom_frame, "🚪 Logout", self.logout, bg="#d32f2f")
         logout_btn.pack(fill="x", padx=10, pady=(10, 15))
         
-        # Status Indicator
         status_frame = tk.Frame(bottom_frame, bg=CLR_SIDEBAR)
         status_frame.pack(fill="x", pady=(0, 15), padx=20)
         self.status_dot = tk.Label(status_frame, text="●", fg=CLR_SUCCESS, bg=CLR_SIDEBAR)
         self.status_dot.pack(side="left")
         self.status_text = tk.Label(status_frame, text="SYSTEM ONLINE", font=("Segoe UI", 8), bg=CLR_SIDEBAR, fg="#9aa0a6")
         self.status_text.pack(side="left", padx=5)
-
-        self.content = tk.Frame(self.root, bg=CLR_BG)
-        self.content.pack(side="right", fill="both", expand=True)
-        self.p_logs = tk.Frame(self.content, bg=CLR_BG)
-        self.p_users = tk.Frame(self.content, bg=CLR_BG)
 
     def show_page(self, pid):
         if pid == "users" and self.role != "Admin":
@@ -1019,10 +1232,10 @@ class LogbookApp:
         if pid in self.nav_btns: self.nav_btns[pid].config(bg=CLR_PRIMARY, fg="white")
         
         if pid == "logs": self.p_logs.pack(fill="both", expand=True); self.draw_logs()
-        elif pid == "users": 
-            for w in self.p_users.winfo_children(): w.destroy()
+        elif pid == "users":
             self.p_users.pack(fill="both", expand=True)
-            self.users_view = ManageUsersView(self.p_users, self.ws_users, FIREBASE_WEB_API_KEY)
+            if not self.users_view:
+                self.users_view = ManageUsersView(self.p_users, self.ws_users, FIREBASE_WEB_API_KEY)
 
     def open_profile_settings(self):
         if not self.ws_users:
@@ -1031,7 +1244,6 @@ class LogbookApp:
         try:
             cell = self.ws_users.find(self.email)
             row_vals = self.ws_users.row_values(cell.row)
-            # Ensure list has enough columns (Email, Role, FName, MI, LName, Pos, Sal, SG)
             if len(row_vals) < 8: row_vals += [""] * (8 - len(row_vals))
         except Exception as e:
             return messagebox.showerror("Error", f"Could not load profile: {e}")
@@ -1041,8 +1253,6 @@ class LogbookApp:
         win.geometry("400x750")
         win.configure(bg=CLR_CARD, padx=30, pady=30)
         win.transient(self.root); win.grab_set()
-        
-        # Center window
         self.root.update_idletasks()
         win.geometry(f"+{self.root.winfo_x() + (self.root.winfo_width()-400)//2}+{self.root.winfo_y() + (self.root.winfo_height()-750)//2}")
 
@@ -1111,7 +1321,6 @@ class LogbookApp:
         h = tk.Frame(self.p_logs, bg=CLR_CARD, pady=20, padx=30); h.pack(fill="x")
         tk.Label(h, text="Digital Logbook", font=("Segoe UI", 18, "bold"), bg=CLR_CARD).pack(side="left")
         
-        # User Profile Icon
         tk.Button(h, text="👤", font=("Segoe UI", 16), bg=CLR_CARD, fg=CLR_PRIMARY, 
                   bd=0, relief="flat", cursor="hand2", command=self.open_profile_settings).pack(side="right", padx=(10, 0))
 
@@ -1126,18 +1335,24 @@ class LogbookApp:
 
         t_card = tk.Frame(self.p_logs, bg=CLR_CARD, padx=1, pady=1); t_card.pack(fill="both", expand=True, padx=30, pady=30)
         
-        if not self.master_logs:
-            if self.ws_logs:
-                try:
-                    raw = self.ws_logs.get_all_values()
-                    self.headers, self.master_logs = raw[0], raw[1:]
-                except: pass
-            else:
-                self.headers = ["Error: No Connection"]
-
-        # Grid layout for scrollbars
         t_card.grid_rowconfigure(0, weight=1)
         t_card.grid_columnconfigure(0, weight=1)
+
+        # Trigger background fetch if needed
+        if self.ws_logs and not self.fetching_logs and not self.data_loaded_from_net:
+            self.fetching_logs = True
+            threading.Thread(target=self._fetch_logs_thread, daemon=True).start()
+
+        if not self.master_logs:
+            # Show loading state
+            self.tree = ttk.Treeview(t_card, columns=("Status",), show="headings")
+            self.tree.heading("Status", text="Status")
+            self.tree.column("Status", width=200, anchor="center")
+            self.tree.grid(row=0, column=0, sticky="nsew")
+            
+            msg = "Loading data..." if (self.fetching_logs or self.connecting) else "No Data Available"
+            self.tree.insert("", "end", values=(msg,))
+            return
 
         self.tree = ttk.Treeview(t_card, columns=self.headers, show="headings")
         
@@ -1152,7 +1367,6 @@ class LogbookApp:
         for c in self.headers: self.tree.heading(c, text=c.upper()); self.tree.column(c, width=150, minwidth=100)
         
         current_year = datetime.now().strftime("%Y")
-        # Sort by Reference Number descending (latest first)
         for r in sorted(self.master_logs, key=lambda x: x[1] if len(x) > 1 else "", reverse=True):
             if len(r) > 0 and str(r[0]).startswith(current_year):
                 self.tree.insert("", "end", values=r)
@@ -1161,6 +1375,27 @@ class LogbookApp:
         self.log_menu.add_command(label="Edit Record", command=self.edit_log_entry)
         self.log_menu.add_command(label="Delete Record", command=self.delete_log_entry, foreground="red")
         self.tree.bind("<Button-3>", self.show_log_menu)
+
+    def _fetch_logs_thread(self):
+        try:
+            raw = self.ws_logs.get_all_values()
+            if raw:
+                self.headers = raw[0]
+                self.master_logs = raw[1:]
+                try:
+                    with open(LOGS_CACHE_FILE, 'w') as f:
+                        json.dump({"headers": self.headers, "rows": self.master_logs}, f)
+                except: pass
+            else:
+                self.headers = ["No Data"]
+                self.master_logs = []
+        except Exception as e:
+            print(f"Log fetch error: {e}")
+            if not self.master_logs: self.headers = ["Error"]
+        
+        self.fetching_logs = False
+        self.data_loaded_from_net = True
+        self.root.after(0, self.draw_logs)
 
     def generate_next_ref_number(self):
         """Generates the next reference number: YYCAR32-XXX"""
@@ -1184,7 +1419,6 @@ class LogbookApp:
         except Exception as e: raise Exception(f"Ref Gen Error: {e}")
 
     def open_new_record_dialog(self):
-        # Larger centered dialog with stacked dropdowns
         win = tk.Toplevel(self.root)
         win.title("New Record")
         ww, wh = 540, 620
@@ -1194,7 +1428,6 @@ class LogbookApp:
         win.transient(self.root)
         win.grab_set()
 
-        # center on parent window
         self.root.update_idletasks()
         rx = self.root.winfo_x(); ry = self.root.winfo_y()
         rw = self.root.winfo_width(); rh = self.root.winfo_height()
@@ -1215,12 +1448,10 @@ class LogbookApp:
         valid_sections = ["PSO", "Admin", "CRS", "PhilSys", "Statistical"]
         valid_modes = ["Email", "Walk-in", "Hand Carry", "JRS", "Routing", "Google Link"]
 
-        # Department (stacked, larger)
         tk.Label(win, text="Section", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(12, 0))
         cb_sec = ttk.Combobox(win, textvariable=vars_local["sec"], font=("Segoe UI", 11), height=10, values=valid_sections, state="readonly")
         cb_sec.pack(fill="x", pady=8, ipady=4)
 
-        # Mode (stacked, larger)
         tk.Label(win, text="Mode of Transmittal", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(8, 0))
         create_multi_select_dropdown(win, valid_modes, vars_local["mode"]).pack(fill="x", pady=6)
 
@@ -1245,7 +1476,6 @@ class LogbookApp:
             if not check_internet():
                 return messagebox.showerror("Network Error", "No internet connection detected.")
 
-            # Prevent closing while saving
             win.protocol("WM_DELETE_WINDOW", lambda: None)
 
             d = [datetime.now().strftime("%Y-%m-%d %H:%M"), "REF", vars_local["part"].get(), vars_local["addr"].get(), vars_local["trans"].get(), vars_local["sec"].get(), vars_local["mode"].get(), vars_local["rem"].get(), self.email]
@@ -1260,7 +1490,7 @@ class LogbookApp:
             d[1] = self.generate_next_ref_number()
             
             self.ws_logs.append_row(d)
-            self.master_logs = []
+            self.master_logs = [] # Force refresh from sheet on next draw
             self.root.after(0, lambda: self._save_success(win, d[1]))
         except Exception as e:
             self.root.after(0, lambda: self._save_error(e, btn, win))
@@ -1275,7 +1505,6 @@ class LogbookApp:
         self.draw_logs()
 
     def _save_error(self, e, btn, win):
-        # 🔴 MUST come FIRST
         win.grab_release()
         win.protocol("WM_DELETE_WINDOW", win.destroy)
         win.focus_force()
@@ -1304,7 +1533,7 @@ class LogbookApp:
         try:
             cell = self.ws_logs.find(ref)
             self.ws_logs.delete_rows(cell.row)
-            self.master_logs = []
+            self.master_logs = [] # Force refresh from sheet on next draw
             self.root.after(0, lambda: (messagebox.showinfo("Success", "Deleted"), self.draw_logs()))
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
@@ -1331,7 +1560,7 @@ class LogbookApp:
         rem_val = val[7] if len(val) > 7 else ""
         v = {k: tk.StringVar(value=val[i]) for k, i in zip(["part", "addr", "trans", "sec", "mode"], [2, 3, 4, 5, 6])}
         v["rem"] = tk.StringVar(value=rem_val)
-        create_labeled_entry(win, "Subject", v["part"])
+        create_labeled_entry(win, "Particulars", v["part"])
         
         create_labeled_entry(win, "Addressee", v["addr"])
         
@@ -1339,14 +1568,14 @@ class LogbookApp:
         cb_trans = ttk.Combobox(win, textvariable=v["trans"], font=("Segoe UI", 11), values=self.user_names_cache, state="readonly")
         cb_trans.pack(fill="x", pady=6, ipady=4)
 
-        valid_sections = ["Admin", "CRS", "PhilSys", "Statistical"]
+        valid_sections = ["PSO", "Admin", "CRS", "PhilSys", "Statistical"]
         valid_modes = ["Email", "Walk-in", "Hand Carry", "JRS", "Routing", "Google Link"]
 
         tk.Label(win, text="Section", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(12, 0))
-        cb_sec = ttk.Combobox(win, textvariable=v["sec"], font=("Segoe UI", 13), values=valid_sections, state="readonly")
-        cb_sec.pack(fill="x", pady=8)
+        cb_sec = ttk.Combobox(win, textvariable=v["sec"], font=("Segoe UI", 11), values=valid_sections, state="readonly")
+        cb_sec.pack(fill="x", pady=8, ipady=4)
 
-        tk.Label(win, text="Mode", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(8, 0))
+        tk.Label(win, text="Mode of Transmittal", font=("Segoe UI", 9, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(8, 0))
         create_multi_select_dropdown(win, valid_modes, v["mode"]).pack(fill="x", pady=6)
 
         create_labeled_entry(win, "Remarks (Optional)", v["rem"])
@@ -1372,12 +1601,13 @@ class LogbookApp:
     def _update_thread(self, ref, data, win, btn):
         try:
             r = self.ws_logs.find(ref).row
-            cells = self.ws_logs.range(f"C{r}:G{r}")
-            for i, c in enumerate(cells): c.value = data[i]
-            self.ws_logs.update_cells(cells)
-            # Update Remarks (Col I)
-            self.ws_logs.update_cell(r, 8, data[5])
-            self.master_logs = []
+            # Update columns C through H (Particulars to Remarks) in a single call
+            cells_to_update = self.ws_logs.range(f"C{r}:H{r}")
+            for i, cell in enumerate(cells_to_update):
+                cell.value = data[i]
+            self.ws_logs.update_cells(cells_to_update)
+
+            self.master_logs = [] # Force refresh from sheet on next draw
             self.root.after(0, lambda: self._save_success(win, ref))
         except Exception as e:
             self.root.after(0, lambda: self._save_error(e, btn, win))
@@ -1386,18 +1616,13 @@ class LogbookApp:
         q = self.s_var.get().lower()
         current_year = datetime.now().strftime("%Y")
         for i in self.tree.get_children(): self.tree.delete(i)
-        # Sort by Reference Number descending (latest first)
         for r in sorted(self.master_logs, key=lambda x: x[1] if len(x) > 1 else "", reverse=True):
             if len(r) > 0 and str(r[0]).startswith(current_year):
                 if any(q in str(cell).lower() for cell in r): self.tree.insert("", "end", values=r)
 
-# ==========================================
-#         LAUNCHER
-# ==========================================
 if __name__ == "__main__":
     root = tk.Tk()
     
-    # Set Window Icon
     try:
         if os.path.exists(Agency_Logo):
             root.iconphoto(True, ImageTk.PhotoImage(Image.open(Agency_Logo)))
@@ -1412,7 +1637,9 @@ if __name__ == "__main__":
             with open(SESSION_FILE, "r") as f:
                 saved_email = f.read().strip()
             if saved_email: 
-                start(saved_email) # user_data is None, LogbookApp will fetch it
+                cached = get_cache_data(saved_email)
+                u_data = cached["user_data"] if cached else None
+                start(saved_email, user_data=u_data)
             else: 
                 LoginWindow(root, start)
         except: 
