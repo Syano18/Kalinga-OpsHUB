@@ -10,6 +10,7 @@ dist/
 # Secrets & Configuration
 credentials.json
 firebase_admin_key.json
+client_secret.json
 
 # Local Session & Data
 session.txt
