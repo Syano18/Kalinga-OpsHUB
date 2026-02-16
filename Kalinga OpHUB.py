@@ -46,7 +46,7 @@ FIREBASE_ADMIN_KEY = resource_path("firebase_admin_key.json")
 FIREBASE_WEB_API_KEY = "AIzaSyAVTSOd5gN4QhFWjXBiQvpTIXLMzT_HSMU" 
 CLIENT_SECRETS_FILE = resource_path("client_secret.json")
 SCOPES = ['https://www.googleapis.com/auth/userinfo.email', 'openid']
-CURRENT_VERSION = "1.5"
+CURRENT_VERSION = "1.7"
 
 # Save session and cache in a user-writable directory
 try:
@@ -754,7 +754,7 @@ class LoginWindow:
 
         def _d():
             try:
-                dest = os.path.join(tempfile.gettempdir(), "Logbook_Update.exe")
+                dest = os.path.join(tempfile.gettempdir(), "KalingaOpsHUB_Update.exe")
                 r = requests.get(url, stream=True)
 
                 total = int(r.headers.get('content-length', 0))
@@ -1289,32 +1289,99 @@ class LogbookApp:
         btn.pack(fill="x", pady=20)
 
     def export_logs(self):
-        """Exports the current view of the logbook to a CSV file."""
-        if not self.tree.get_children():
-            messagebox.showwarning("Export", "No data available to export.")
-            return
+        if not self.master_logs:
+            return messagebox.showwarning("Export", "No data available to export.")
 
-        try:
-            filename = f"Logbook_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            file_path = filedialog.asksaveasfilename(
-                initialfile=filename,
-                defaultextension=".csv",
-                filetypes=[("CSV (Excel) files", "*.csv"), ("All files", "*.*")],
-                title="Export Logbook Data"
-            )
+        # Get available years
+        years = set()
+        for r in self.master_logs:
+            if r and len(r) > 0:
+                try: years.add(str(datetime.strptime(r[0], "%Y-%m-%d %H:%M").year))
+                except: pass
+        sorted_years = sorted(list(years), reverse=True)
+        if not sorted_years: sorted_years = [datetime.now().strftime("%Y")]
+
+        win = tk.Toplevel(self.root)
+        win.title("Export Options")
+        win.geometry("350x350")
+        win.configure(bg=CLR_CARD, padx=20, pady=20)
+        win.transient(self.root); win.grab_set()
+        
+        self.root.update_idletasks()
+        win.geometry(f"+{self.root.winfo_x() + (self.root.winfo_width()-350)//2}+{self.root.winfo_y() + (self.root.winfo_height()-350)//2}")
+
+        tk.Label(win, text="Export Data", font=("Segoe UI", 12, "bold"), bg=CLR_CARD).pack(anchor="w", pady=(0, 15))
+
+        mode_var = tk.StringVar(value="Current View")
+        year_var = tk.StringVar(value=sorted_years[0])
+        month_var = tk.StringVar(value=datetime.now().strftime("%B"))
+        
+        opts_frame = tk.Frame(win, bg=CLR_CARD)
+        opts_frame.pack(fill="x", pady=5)
+        
+        year_frame = tk.Frame(win, bg=CLR_CARD)
+        month_frame = tk.Frame(win, bg=CLR_CARD)
+
+        def update_ui():
+            year_frame.pack_forget(); month_frame.pack_forget()
+            if mode_var.get() == "By Year": year_frame.pack(fill="x", pady=10)
+            elif mode_var.get() == "By Month": month_frame.pack(fill="x", pady=10)
+
+        for txt, val in [("Current View (Filtered)", "Current View"), ("By Year", "By Year"), ("By Month", "By Month")]:
+            tk.Radiobutton(opts_frame, text=txt, variable=mode_var, value=val, command=update_ui, bg=CLR_CARD, font=("Segoe UI", 10)).pack(anchor="w", pady=2)
+
+        tk.Label(year_frame, text="Select Year:", bg=CLR_CARD, font=("Segoe UI", 9)).pack(anchor="w")
+        ttk.Combobox(year_frame, textvariable=year_var, values=sorted_years, state="readonly").pack(fill="x", pady=5)
+
+        tk.Label(month_frame, text="Select Month & Year:", bg=CLR_CARD, font=("Segoe UI", 9)).pack(anchor="w")
+        m_row = tk.Frame(month_frame, bg=CLR_CARD)
+        m_row.pack(fill="x", pady=5)
+        months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        ttk.Combobox(m_row, textvariable=month_var, values=months, state="readonly", width=15).pack(side="left", padx=(0,5))
+        ttk.Combobox(m_row, textvariable=year_var, values=sorted_years, state="readonly", width=10).pack(side="left")
+
+        def proceed():
+            mode = mode_var.get()
+            data = []
+            suffix = ""
             
+            if mode == "Current View":
+                data = [self.tree.item(i)['values'] for i in self.tree.get_children()]
+                suffix = "CurrentView"
+            elif mode == "By Year":
+                y = year_var.get()
+                data = [r for r in self.master_logs if len(r) > 0 and str(r[0]).startswith(y)]
+                suffix = f"Year_{y}"
+            elif mode == "By Month":
+                y = year_var.get()
+                m = month_var.get()
+                try:
+                    m_num = datetime.strptime(m, "%B").month
+                    prefix = f"{y}-{m_num:02d}"
+                    data = [r for r in self.master_logs if len(r) > 0 and str(r[0]).startswith(prefix)]
+                    suffix = f"{m}_{y}"
+                except: pass
+
+            if not data: return messagebox.showwarning("Export", "No records found.")
+            
+            win.destroy()
+            self._perform_export(data, suffix)
+
+        create_modern_button(win, "Export", proceed).pack(fill="x", side="bottom")
+
+    def _perform_export(self, data, suffix):
+        try:
+            filename = f"Logbook_{suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            file_path = filedialog.asksaveasfilename(initialfile=filename, defaultextension=".csv", filetypes=[("CSV files", "*.csv")], title="Export Data")
             if file_path:
-                with open(file_path, mode='w', newline='', encoding='utf-8-sig') as f:
+                with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                     writer = csv.writer(f)
                     writer.writerow(self.headers)
-                    for item in self.tree.get_children():
-                        writer.writerow(self.tree.item(item)['values'])
-                
-                if messagebox.askyesno("Export Successful", f"Data exported to:\n{file_path}\n\nOpen file now?"):
+                    writer.writerows(data)
+                if messagebox.askyesno("Success", f"Exported to {file_path}\nOpen now?"):
                     try: os.startfile(file_path)
                     except: pass
-        except Exception as e:
-            messagebox.showerror("Export Error", f"Failed to export: {e}")
+        except Exception as e: messagebox.showerror("Error", f"Export failed: {e}")
 
     def draw_logs(self):
         for w in self.p_logs.winfo_children(): w.destroy()
@@ -1373,7 +1440,6 @@ class LogbookApp:
         
         self.log_menu = tk.Menu(self.root, tearoff=0)
         self.log_menu.add_command(label="Edit Record", command=self.edit_log_entry)
-        self.log_menu.add_command(label="Delete Record", command=self.delete_log_entry, foreground="red")
         self.tree.bind("<Button-3>", self.show_log_menu)
 
     def _fetch_logs_thread(self):
@@ -1464,6 +1530,10 @@ class LogbookApp:
             if not all(vars_local[k].get().strip() for k in ["part", "addr", "trans", "sec", "mode"]):
                 return messagebox.showwarning("Error", "All fields are required")
             
+            addr_clean = vars_local["addr"].get().replace(" ", "").lower()
+            if addr_clean in ["co", "ro", "centraloffice", "regionaloffice"]:
+                return messagebox.showwarning("Invalid Input", "Generic addressees like 'CO', 'RO', 'Central Office', or 'Regional Office' are not allowed.")
+            
             if vars_local["sec"].get() not in valid_sections:
                 return messagebox.showwarning("Invalid Input", "Please select a valid Section from the list.")
             
@@ -1491,6 +1561,7 @@ class LogbookApp:
             
             self.ws_logs.append_row(d)
             self.master_logs = [] # Force refresh from sheet on next draw
+            self.data_loaded_from_net = False
             self.root.after(0, lambda: self._save_success(win, d[1]))
         except Exception as e:
             self.root.after(0, lambda: self._save_error(e, btn, win))
@@ -1518,25 +1589,6 @@ class LogbookApp:
         if item:
             self.tree.selection_set(item)
             self.log_menu.post(event.x_root, event.y_root)
-
-    def delete_log_entry(self):
-        sel = self.tree.selection()
-        if not sel: return
-        val = self.tree.item(sel[0])['values']
-        if len(val) > 8 and str(val[8]) != self.email:
-            return messagebox.showerror("Access Denied", "You can only delete your own records.")
-        
-        if messagebox.askyesno("Confirm", f"Delete record {val[1]}?"):
-            threading.Thread(target=self._delete_thread, args=(val[1],)).start()
-
-    def _delete_thread(self, ref):
-        try:
-            cell = self.ws_logs.find(ref)
-            self.ws_logs.delete_rows(cell.row)
-            self.master_logs = [] # Force refresh from sheet on next draw
-            self.root.after(0, lambda: (messagebox.showinfo("Success", "Deleted"), self.draw_logs()))
-        except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
     def edit_log_entry(self):
         sel = self.tree.selection()
@@ -1608,6 +1660,7 @@ class LogbookApp:
             self.ws_logs.update_cells(cells_to_update)
 
             self.master_logs = [] # Force refresh from sheet on next draw
+            self.data_loaded_from_net = False
             self.root.after(0, lambda: self._save_success(win, ref))
         except Exception as e:
             self.root.after(0, lambda: self._save_error(e, btn, win))
