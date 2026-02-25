@@ -1,0 +1,89 @@
+name: Build and Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Triggers on version tags like v2.0.0
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller "Kalinga OpHUB.spec"
+
+      - name: Upload PyInstaller artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: dist/
+
+      - name: Download InnoSetup compiler
+        run: |
+          $innoSetupUrl = "https://files.jrsoftware.org/is/6/innosetup-6.2.2.exe"
+          $installerPath = "$env:TEMP\innosetup-installer.exe"
+          Invoke-WebRequest -Uri $innoSetupUrl -OutFile $installerPath
+          & $installerPath /SILENT /VERYSILENT /NORESTART
+
+      - name: Build installer with InnoSetup
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "OpsHUB.iss"
+
+      - name: Get version from tag
+        id: tag_version
+        run: |
+          $tag = "${{ github.ref }}" -replace 'refs/tags/', ''
+          echo "version=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Create Draft Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ steps.tag_version.outputs.version }}
+          draft: true
+          prerelease: false
+
+      - name: Upload exe to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: dist/Kalinga OpHUB/Kalinga OpHUB.exe
+          asset_name: Kalinga-OpHUB.exe
+          asset_content_type: application/octet-stream
+
+      - name: Upload installer to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: Output/KalingaOpsHUB-Installer.exe
+          asset_name: KalingaOpsHUB-Installer.exe
+          asset_content_type: application/octet-stream
+
+      - name: Release created
+        run: |
+          echo "✅ Draft release created successfully!"
+          echo "📦 Version: ${{ steps.tag_version.outputs.version }}"
+          echo "🔗 Release URL: ${{ steps.create_release.outputs.html_url }}"
