@@ -69,7 +69,7 @@ TURSO_AUTH_TOKEN    = os.getenv("TURSO_AUTH_TOKEN")
 FIREBASE_WEB_API_KEY= os.getenv("FIREBASE_WEB_API_KEY")
 GITHUB_OWNER        = "Syano18"
 GITHUB_REPO         = "Kalinga-OpsHUB"
-CURRENT_VERSION     = "2.8"
+CURRENT_VERSION     = "2.5"
 SCOPES              = ['https://www.googleapis.com/auth/userinfo.email', 'openid']
 
 USER_HEADERS = ["Email","Role","First Name","Middle Initial","Last Name",
@@ -1494,10 +1494,10 @@ class LoginScreen(Screen):
         msg = _label("Initializing…", size=11, color=P["subtext"], height=26)
         body.add_widget(pb)
         body.add_widget(msg)
-        pop = _make_popup("Updating…", body, w=370, h=250)
+        pop = _make_popup("Updating…", body, w=370, h=200)
         pop.auto_dismiss = False
         pop.open()
-        def _dl(msg_lbl=msg, pb_widget=pb):
+        def _dl():
             import requests
             try:
                 dest = os.path.join(tempfile.gettempdir(),"KalingaOpsHUB_Update.exe")
@@ -1510,12 +1510,12 @@ class LoginScreen(Screen):
                             f.write(chunk); dl+=len(chunk)
                             if tot:
                                 p=int(dl*100/tot)
-                                Clock.schedule_once(lambda dt, pv=p: (setattr(pb_widget, 'value', pv), setattr(msg_lbl, 'text', f"{pv}% complete")), 0)
+                                Clock.schedule_once(lambda dt,pv=p:(setattr(pb_ref['pb'],'value',pv), setattr(msg,'text',f"{pv}% complete")),0)
                 if os.path.getsize(dest)<1024: raise Exception("File too small.")
                 Clock.schedule_once(lambda dt:(subprocess.Popen([dest]),App.get_running_app().stop()),0)
             except Exception as e:
-                err_msg = str(e)
-                Clock.schedule_once(lambda dt, m=err_msg: (pop.dismiss(), show_message("Error", m, msg_type="error")), 0)
+                msg = str(e)
+                Clock.schedule_once(lambda dt:(pop.dismiss(), show_message("Error",msg,msg_type="error")),0)
         threading.Thread(target=_dl, daemon=True).start()
 
     def _open_forgot(self):
@@ -1624,7 +1624,6 @@ class LoginScreen(Screen):
     def _auth(self, em, pw):
         import requests
         db={"ud":None}
-        fail_msg = "Invalid login details"
         def _db():
             try:
                 rows=run_query('SELECT "Email","Role","First_Name","Middle_Name","Last_Name",'
@@ -1645,18 +1644,10 @@ class LoginScreen(Screen):
                 except: pass
                 Clock.schedule_once(lambda dt:App.get_running_app().launch_main(em,ud),0)
             else:
-                msg = "Invalid login details"
+                msg="Invalid login details"
                 try:
-                    err_data = r.json().get('error', {})
-                    e = err_data.get('message', '')
-                    if e == "USER_DISABLED":
-                        msg = "Account is disabled."
-                    elif e == "INVALID_LOGIN_CREDENTIALS":
-                        msg = "Invalid email or password."
-                    elif e == "API_KEY_INVALID":
-                        msg = "Configuration Error: The Firebase API Key is invalid."
-                    elif e:
-                        msg = f"Firebase Error: {e}"
+                    e=r.json().get('error',{}).get('message','')
+                    if e=="USER_DISABLED": msg="Account is disabled."
                 except: pass
                 Clock.schedule_once(lambda dt:self._fail(msg),0)
         except Exception as e:

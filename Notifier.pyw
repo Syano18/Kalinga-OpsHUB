@@ -194,7 +194,7 @@ def main():
                             display_time = str(p_time)
 
                     send_toast(
-                        "Kalinga OpsHUB",
+                        "❤ Sumakses!",
                         f"Ni {full_name} ket nag {label} iti oras {display_time}."
                     )
                     last_update_ts = updated_at
@@ -203,7 +203,7 @@ def main():
         if errors:
             for err in errors:
                 error_msg, created_at = err
-                send_toast("⚠️ Biometric System Error", error_msg, is_error=True)
+                send_toast("🚫 Hooppia!", error_msg, is_error=True)
                 last_error_ts = created_at
                 time.sleep(0.5)
 
