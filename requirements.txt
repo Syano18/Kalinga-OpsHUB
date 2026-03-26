@@ -1,0 +1,5 @@
+requests
+libsql-client
+python-dotenv
+kivy
+google-auth-oauthlib

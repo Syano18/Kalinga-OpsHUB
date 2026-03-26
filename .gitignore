@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller Artifacts
+build/
+dist/
+Output/
+*.spec
+
+# Secrets & Configuration
+credentials.json
+firebase_admin_key.json
+.env
+app_secrets.py
+client_secret.json
+
+# Local Session & Data
+session.txt
+user_session.txt
+*.csv
+.venv
+.vscode
+
+Kalinga OpsHUB.spec
+Notifier.spec
+
+firebase_credentials.json
+Github Push.txt
+OpsHUB.iss
